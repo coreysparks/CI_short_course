@@ -1,0 +1,87 @@
+---
+title: "Coleridge Initiative Short Course"
+subtitle: "Advanced Data Visualization"
+editor: visual
+---
+
+# Course description
+
+This course is designed as a modern introduction to using the R programming language.
+
+Participants in the course will have the opportunity to explore confidential microdata using the Rstudio development environmet and tools from the tidyverse suite of R packages within the ADRF secure data environment.
+
+Topics will include data access, manipulation, and summarization as well as coverage of data visualization using the ggplot2 package.
+
+Upon completion of this short course, participants will have introductory exposure to tools that are applicable to a wide variety of research settings and that will prepare them for more advanced coursework in applied data analytics.
+
+# Basic Course Structure
+
+2 hours per week of instruction
+
+2 hours of homework
+
+4 weeks total course length
+
+::: {.callout collapse="true"}
+## Suggested Readings
+
+[R Gallery Book](https://bookdown.org/content/b298e479-b1ab-49fa-b83d-a57c2b034d49/)
+
+[ggplot2 book 3rd ed](https://ggplot2-book.org/)
+
+Wickham, Cetinkaya-Rundel and Grolemund. [R for data science](https://r4ds.hadley.nz/) 2nd edition
+
+Wickham [Mastering Shiny](https://mastering-shiny.org/index.html)
+:::
+
+::: {.callout collapse="true"}
+## Course calendar
+
++----------+-----------------------------------------------------------------------------------+---------------------------------------------------------------+--------------------------------------------------------------+-----------------------+
+| **Week** | **Topic**                                                                         | Content to be covered                                         | Learning Outcome                                             | **S**uggested Reading |
++==========+===================================================================================+===============================================================+==============================================================+=======================+
+| 1        | Modifying ggplot objects and colors                                               | Recap of `ggplot2` `geom_*` and `aes()`                       | Successfully modify the default theme of plots               |                       |
+|          |                                                                                   |                                                               |                                                              |                       |
+|          |                                                                                   | Faceting plots                                                | Produce grouped/segmented plots using facets                 |                       |
+|          |                                                                                   |                                                               |                                                              |                       |
+|          |                                                                                   | Scales and guides                                             |                                                              |                       |
+|          |                                                                                   |                                                               |                                                              |                       |
+|          |                                                                                   | Themes                                                        |                                                              |                       |
++----------+-----------------------------------------------------------------------------------+---------------------------------------------------------------+--------------------------------------------------------------+-----------------------+
+| 2        | Advanced `ggplot` types part 1 - Alternative plot types and visualizing text data | Heat maps, tree maps, varying sizes, radar plots, flow charts |                                                              |                       |
+|          |                                                                                   |                                                               |                                                              |                       |
+|          |                                                                                   | Word clouds                                                   |                                                              |                       |
++----------+-----------------------------------------------------------------------------------+---------------------------------------------------------------+--------------------------------------------------------------+-----------------------+
+| 3        | Advanced ggplot part 2 - Mapping/spatial data                                     | Types of geographic data                                      |                                                              |                       |
+|          |                                                                                   |                                                               |                                                              |                       |
+|          |                                                                                   | Reading and writing spatial data                              |                                                              |                       |
+|          |                                                                                   |                                                               |                                                              |                       |
+|          |                                                                                   | Geographic aggregation                                        |                                                              |                       |
+|          |                                                                                   |                                                               |                                                              |                       |
+|          |                                                                                   | Choropleth maps                                               |                                                              |                       |
++----------+-----------------------------------------------------------------------------------+---------------------------------------------------------------+--------------------------------------------------------------+-----------------------+
+| 4        | Animation, interactivity                                                          | Advanced use of plotly objects for interactive visualization  |                                                              |                       |
+|          |                                                                                   |                                                               |                                                              |                       |
+|          |                                                                                   | Creation of animations using `gganimate`                      |                                                              |                       |
++----------+-----------------------------------------------------------------------------------+---------------------------------------------------------------+--------------------------------------------------------------+-----------------------+
+| 5        | Basic Shiny app construction                                                      | Creating basic Shiny apps for interactive data analysis       | Demonstrate knowledge of Shiny app structure (ui and server) |                       |
+|          |                                                                                   |                                                               |                                                              |                       |
+|          |                                                                                   |                                                               | Successfully create a shiny app for static data display      |                       |
+|          |                                                                                   |                                                               |                                                              |                       |
+|          |                                                                                   |                                                               | Successfully create a shiny app with reactivity              |                       |
++----------+-----------------------------------------------------------------------------------+---------------------------------------------------------------+--------------------------------------------------------------+-----------------------+
+:::
+
+### Additional ideas
+
+gghighlight
+
+uncertainty
+
+maps
+
+circular bars
+
+word clouds
+
+flow maps

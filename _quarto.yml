@@ -1,0 +1,23 @@
+project:
+  title: "CI_short_course"
+  render: 
+    - CI_short_course.qmd
+    - CI_prog_course.qmd
+    - CI_adv_viz.qmd
+
+    
+
+format:
+   html:
+      theme: jounal
+      highlight-style: arrow
+      self-contained: true
+      toc: true
+      code-fold: false
+      code-tools: true
+      #    source: https://github.com/coreysparks/caring_consulting/blob/main/code/d_5.qmd
+      code-link: true
+      df-print: paged
+
+
+
