@@ -4,3 +4,10 @@
 .Ruserdata
 
 /.quarto/
+
+# Shiny app secrets and credentials
+.Renviron
+.secrets/
+*.json
+!package.json
+!package-lock.json

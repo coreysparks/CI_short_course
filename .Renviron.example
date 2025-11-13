@@ -1,0 +1,8 @@
+# Google Sheets Configuration
+# Copy this file to .Renviron and fill in your actual values
+
+# URL of your Google Sheet for storing applications
+GOOGLE_SHEETS_URL=https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID_HERE/edit
+
+# Optional: Path to service account JSON key (for production deployment)
+# GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
