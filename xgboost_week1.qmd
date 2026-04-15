@@ -1,0 +1,333 @@
+---
+title: "GBM Short Course – Week 1"
+subtitle: "Introduction to Machine Learning and Decision Trees"
+format:
+  html:
+    toc: true
+    code-fold: false
+    code-tools: true
+    highlight-style: arrow
+    self-contained: true
+    df-print: paged
+---
+
+# Learning Objectives
+
+By the end of this lesson you will be able to:
+
+- Distinguish supervised from unsupervised learning and identify the regression vs. classification task types
+- Explain the bias-variance tradeoff and why it matters for model selection
+- Build and visualize a decision tree classifier using `rpart` and `rpart.plot`
+- Understand how trees split data using Gini impurity and residual sum of squares
+- Recognize overfitting in a decision tree and apply cost-complexity pruning
+
+---
+
+# 1. What Is Machine Learning?
+
+**Machine learning** is a collection of algorithms that learn patterns from data in order to make predictions or decisions on new, unseen data. Rather than being explicitly programmed with rules, a machine learning model discovers those rules itself.
+
+## 1.1 Supervised vs. Unsupervised Learning
+
+| Task | Definition | Example |
+|------|-----------|---------|
+| **Supervised learning** | Learn a mapping from inputs $X$ to a known output $y$ | Predict whether an employee will leave the organization |
+| **Unsupervised learning** | Find structure in data without a known output | Cluster individuals by spending behavior |
+
+This course focuses entirely on **supervised learning**.
+
+Within supervised learning, there are two main task types:
+
+- **Classification** – the outcome $y$ is a discrete category (e.g., *Yes/No*, *employed/unemployed*)
+- **Regression** – the outcome $y$ is continuous (e.g., annual earnings, length of employment spell)
+
+## 1.2 The Bias-Variance Tradeoff
+
+Every predictive model makes a tradeoff between two sources of error:
+
+- **Bias** – error from wrong assumptions; a model that is too simple will *underfit*, missing real patterns in the data
+- **Variance** – error from sensitivity to small fluctuations in the training data; a model that is too complex will *overfit*, capturing noise rather than signal
+
+```
+Total Error ≈ Bias² + Variance + Irreducible Noise
+```
+
+The goal is to find a model complexity that minimizes total error on **new data**, not just the data used to fit the model. We assess this by evaluating performance on a held-out **test set**.
+
+---
+
+# 2. Setting Up
+
+We use three publicly available R packages in this lesson. Install them once from CRAN if needed.
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+
+library(tidyverse)    # data manipulation and ggplot2 visualization
+library(tidymodels)   # modeling framework (includes rsample, yardstick, recipes)
+library(rpart)        # decision tree algorithm
+library(rpart.plot)   # tree visualization
+library(modeldata)    # example datasets including `attrition`
+
+# Ensure reproducibility
+set.seed(2024)
+```
+
+## 2.1 The Dataset: Employee Attrition
+
+We use the `attrition` dataset from the `modeldata` package. It contains 1,470 employee records with 30 predictor variables and one binary outcome: whether the employee left the organization (`Attrition = "Yes"`) or stayed (`Attrition = "No"`).
+
+This mirrors the kind of administrative HR microdata that arises in government and organizational research.
+
+```{r}
+#| label: load-data
+data(attrition)
+
+# Quick overview
+glimpse(attrition)
+```
+
+```{r}
+#| label: outcome-distribution
+attrition |>
+  count(Attrition) |>
+  mutate(pct = n / sum(n))
+```
+
+::: {.callout-note}
+**Class imbalance**: Only ~16% of employees left. This is typical of attrition data and will matter when we evaluate model performance later in the course.
+:::
+
+## 2.2 Train/Test Split
+
+Before fitting any model, we partition the data into a **training set** (used to fit the model) and a **test set** (held back to evaluate generalization). We use stratified sampling to preserve the outcome distribution in both splits.
+
+```{r}
+#| label: split
+set.seed(2024)
+att_split <- initial_split(attrition, prop = 0.80, strata = Attrition)
+att_train <- training(att_split)
+att_test  <- testing(att_split)
+
+cat("Training rows:", nrow(att_train), "\n")
+cat("Test rows:    ", nrow(att_test),  "\n")
+```
+
+---
+
+# 3. Decision Trees
+
+A **decision tree** partitions the feature space into rectangular regions, assigning a prediction to each region. The tree is built by recursively choosing the split (variable + threshold) that best separates the outcome.
+
+## 3.1 How Trees Split: Gini Impurity
+
+For classification, the most common splitting criterion is **Gini impurity**. For a node containing observations from $K$ classes with class proportions $p_1, p_2, \ldots, p_K$:
+
+$$G = 1 - \sum_{k=1}^{K} p_k^2$$
+
+A Gini of 0 means all observations in the node belong to one class (perfectly pure). A Gini of 0.5 (for two classes) means the classes are evenly mixed (maximum impurity). At each split, the algorithm chooses the variable and threshold that maximally reduces Gini impurity.
+
+### Worked Example
+
+Suppose a node has 100 employees: 84 who stayed and 16 who left.
+
+```{r}
+#| label: gini-example
+stayed <- 84 / 100
+left   <- 16 / 100
+gini   <- 1 - (stayed^2 + left^2)
+cat("Gini impurity:", round(gini, 4), "\n")
+```
+
+## 3.2 Building a Decision Tree with `rpart`
+
+```{r}
+#| label: tree-fit
+tree_model <- rpart(
+  Attrition ~ .,          # predict Attrition from all other variables
+  data    = att_train,
+  method  = "class",      # classification tree
+  control = rpart.control(
+    maxdepth  = 4,        # limit tree depth to avoid overfitting
+    minsplit  = 20,       # minimum observations required to attempt a split
+    cp        = 0.01      # complexity parameter (pruning threshold)
+  )
+)
+```
+
+## 3.3 Visualizing the Tree
+
+```{r}
+#| label: tree-plot
+#| fig-width: 12
+#| fig-height: 6
+rpart.plot(
+  tree_model,
+  type    = 4,      # label all nodes
+  extra   = 104,    # show class probabilities and sample size
+  box.palette = "RdBu",
+  shadow.col  = "gray",
+  main    = "Decision Tree: Employee Attrition"
+)
+```
+
+Each node shows:
+
+- The predicted class (top line)
+- The probability of each class
+- The percentage of training data in that node
+
+The **root node** at the top represents all training data. Each branch represents a decision rule. Leaf nodes (bottom) give the final prediction.
+
+## 3.4 Inspecting Variable Importance
+
+`rpart` records the total improvement in the splitting criterion attributed to each variable.
+
+```{r}
+#| label: tree-importance
+vi <- tree_model$variable.importance
+tibble(
+  variable   = names(vi),
+  importance = vi
+) |>
+  arrange(desc(importance)) |>
+  slice_head(n = 10) |>
+  ggplot(aes(x = importance, y = fct_reorder(variable, importance))) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "Top 10 Variables by Importance",
+    x     = "Importance (total Gini reduction)",
+    y     = NULL
+  ) +
+  theme_minimal()
+```
+
+## 3.5 Evaluating on the Test Set
+
+```{r}
+#| label: tree-eval
+# Generate predictions on the test set
+tree_preds <- predict(tree_model, att_test, type = "class")
+
+# Confusion matrix
+conf_mat <- table(Predicted = tree_preds, Actual = att_test$Attrition)
+print(conf_mat)
+
+# Accuracy
+accuracy <- sum(diag(conf_mat)) / sum(conf_mat)
+cat("\nAccuracy:", round(accuracy, 4), "\n")
+```
+
+---
+
+# 4. Overfitting and Tree Depth
+
+A tree that is grown without constraints will eventually memorize the training data — achieving near-perfect training accuracy while performing poorly on new data. This is **overfitting**.
+
+## 4.1 Demonstrating the Tradeoff
+
+We fit trees at increasing depths and compare training vs. test accuracy.
+
+```{r}
+#| label: depth-tradeoff
+depth_results <- map_dfr(1:10, function(d) {
+  m <- rpart(
+    Attrition ~ ., data = att_train, method = "class",
+    control = rpart.control(maxdepth = d, cp = 0)
+  )
+
+  train_acc <- mean(predict(m, att_train, type = "class") == att_train$Attrition)
+  test_acc  <- mean(predict(m, att_test,  type = "class") == att_test$Attrition)
+
+  tibble(depth = d, train_accuracy = train_acc, test_accuracy = test_acc)
+})
+
+depth_results |>
+  pivot_longer(cols = c(train_accuracy, test_accuracy),
+               names_to = "split", values_to = "accuracy") |>
+  mutate(split = if_else(split == "train_accuracy", "Training", "Test")) |>
+  ggplot(aes(x = depth, y = accuracy, color = split)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Training" = "steelblue", "Test" = "tomato")) +
+  scale_x_continuous(breaks = 1:10) +
+  labs(
+    title  = "Bias-Variance Tradeoff: Tree Depth",
+    x      = "Maximum Tree Depth",
+    y      = "Accuracy",
+    color  = NULL
+  ) +
+  theme_minimal()
+```
+
+Notice how training accuracy keeps rising while test accuracy peaks and then levels off or declines. The optimal depth balances underfitting and overfitting.
+
+## 4.2 Cost-Complexity Pruning
+
+`rpart` implements **cost-complexity pruning**: it penalizes the number of leaves in a tree, shrinking it to the depth that minimizes cross-validated error. The tuning parameter is `cp` (complexity parameter).
+
+```{r}
+#| label: pruning
+# Grow a full tree
+full_tree <- rpart(
+  Attrition ~ ., data = att_train, method = "class",
+  control = rpart.control(cp = 0, minsplit = 5)
+)
+
+# Plot cross-validated error vs. cp
+plotcp(full_tree)
+```
+
+```{r}
+#| label: best-cp
+# Select cp with smallest cross-validated error (xerror)
+best_cp <- full_tree$cptable |>
+  as_tibble() |>
+  slice_min(xerror, n = 1) |>
+  pull(CP)
+
+cat("Best cp:", round(best_cp, 5), "\n")
+
+# Prune to the optimal size
+pruned_tree <- prune(full_tree, cp = best_cp)
+
+# Compare sizes
+cat("Full tree leaves:  ", sum(full_tree$frame$var == "<leaf>"),  "\n")
+cat("Pruned tree leaves:", sum(pruned_tree$frame$var == "<leaf>"), "\n")
+```
+
+```{r}
+#| label: pruned-eval
+pruned_preds <- predict(pruned_tree, att_test, type = "class")
+pruned_acc   <- mean(pruned_preds == att_test$Attrition)
+cat("Pruned tree test accuracy:", round(pruned_acc, 4), "\n")
+```
+
+---
+
+# 5. Summary
+
+| Concept | Key Takeaway |
+|---------|-------------|
+| Supervised learning | Maps inputs to a known output using training data |
+| Classification vs. regression | Discrete vs. continuous outcome |
+| Bias-variance tradeoff | Simpler models underfit; complex models overfit |
+| Gini impurity | Measures class mixing; trees minimize it at each split |
+| `rpart` | R package for decision tree construction |
+| Cost-complexity pruning | Shrinks an overfit tree to the right size using cross-validation |
+
+---
+
+# 6. Exercises
+
+1. **Data exploration** – Using the `attrition` dataset, create a bar chart showing the average monthly income by department and job role. Does income appear predictive of attrition?
+
+2. **Tree depth** – Re-run the depth tradeoff analysis using `min_n` (minimum node size) instead of max depth as the control parameter. Does the tradeoff behave similarly?
+
+3. **Gini impurity** – Compute the Gini impurity for the root node (before any splitting) using the overall attrition rate. Then compute it for a hypothetical split that produces two perfectly pure child nodes. What is the Gini gain?
+
+4. **Different split** – Fit a decision tree using only the top 5 variables identified by `variable.importance`. Compare its test accuracy to the full-feature tree. What do you observe?
+
+5. **Regression tree** – Load the `ames` dataset (`data(ames, package = "modeldata")`). Fit a regression tree (`method = "anova"`) predicting `Sale_Price`. Visualize the tree and compute RMSE on a held-out test set.

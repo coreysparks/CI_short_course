@@ -1,0 +1,50 @@
+---
+title: "GBM Short Course"
+subtitle: "Gradient Boosting and XGBoost for Predictive Modeling"
+---
+
+# Course Description
+
+This course provides a comprehensive introduction to gradient boosting machine (GBM) methods and XGBoost for predictive modeling using R. Building on foundational data analysis skills, participants will learn to construct, evaluate, and interpret advanced tree-based machine learning models applied to social science and administrative data contexts.
+
+The course progresses from core supervised learning concepts through decision trees, ensemble methods, and gradient boosting, culminating in practical XGBoost implementation with hyperparameter tuning and model interpretation. Hands-on instruction uses the `tidymodels` ecosystem alongside the `xgboost` package in R.
+
+Upon completion, participants will be able to build, tune, and interpret XGBoost models for classification and regression tasks relevant to applied research with administrative microdata.
+
+# Basic Course Structure
+
+2 hours per week of instruction
+
+2 hours of homework
+
+5 weeks total course length
+
+::: {.callout collapse="true"}
+## Suggested Readings
+
+Harrison, Matt. [Effective XGBoost](https://github.com/mattharrison/effective_xgboost_book)
+
+Kuhn and Silge. [Tidy Modeling with R](https://www.tmwr.org/)
+
+James, Witten, Hastie, and Tibshirani. [An Introduction to Statistical Learning with Applications in R](https://www.statlearning.com/) 2nd edition
+:::
+
+::: {.callout collapse="true"}
+## Course Calendar
+
++-----------+-----------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+-----------------------------------------+
+| **Week**  | **Topic**                                                 | Content to be covered                                                                                                                 | Learning Outcome                                                                                 | **Suggested Reading**                   |
++===========+===========================================================+=======================================================================================================================================+==================================================================================================+=========================================+
+| 1         | Introduction to Machine Learning and Decision Trees       | Supervised vs. unsupervised learning, bias-variance tradeoff, decision tree construction, splitting criteria (Gini impurity, RSS), tree pruning, visualization with `rpart.plot` | Understand core ML concepts; build and visualize a decision tree using `rpart`; identify signs of overfitting | ISLR Ch. 8.1                            |
++-----------+-----------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+-----------------------------------------+
+| 2         | Ensemble Methods: Bagging and Random Forests              | Ensemble learning concepts, bootstrap aggregating (bagging), random forests, out-of-bag (OOB) error estimation, variable importance with `vip`   | Build a random forest with `tidymodels`; interpret variable importance; compare RF to single trees | ISLR Ch. 8.2                            |
++-----------+-----------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+-----------------------------------------+
+| 3         | Gradient Boosting and XGBoost                             | Boosting theory, residual learning, gradient boosting algorithm, XGBoost innovations (regularization, column subsampling, sparsity awareness), key hyperparameters (`nrounds`, `eta`, `max_depth`, `subsample`), early stopping | Implement an XGBoost model; use early stopping; understand the role of each key hyperparameter   | Harrison Ch. 1–5                        |
++-----------+-----------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+-----------------------------------------+
+| 4         | Hyperparameter Tuning and Model Validation                | Cross-validation, resampling strategies (`rsample`), grid search with `tune_grid()`, Bayesian optimization with `tune_bayes()`, model comparison and final model selection | Tune XGBoost hyperparameters systematically; select a final model using proper resampling        | Tidy Modeling Ch. 12–14                 |
++-----------+-----------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+-----------------------------------------+
+| 5         | Model Evaluation and Interpretation                       | Classification metrics (confusion matrix, precision, recall, F1, ROC-AUC), regression metrics (RMSE, MAE, R²), feature importance, SHAP values with `shapviz`, partial dependence plots with `pdp` | Compute and interpret ROC/AUC; generate SHAP explanations; create partial dependence plots       | Harrison Ch. 6–8; Tidy Modeling Ch. 9  |
++-----------+-----------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+-----------------------------------------+
+|           |                                                           |                                                                                                                                       |                                                                                                  |                                         |
++-----------+-----------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+-----------------------------------------+
+:::

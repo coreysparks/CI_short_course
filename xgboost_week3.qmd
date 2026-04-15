@@ -1,0 +1,433 @@
+---
+title: "GBM Short Course – Week 3"
+subtitle: "Gradient Boosting and XGBoost"
+format:
+  html:
+    toc: true
+    code-fold: false
+    code-tools: true
+    highlight-style: arrow
+    self-contained: true
+    df-print: paged
+---
+
+# Learning Objectives
+
+By the end of this lesson you will be able to:
+
+- Explain the boosting algorithm conceptually as sequential residual learning
+- Contrast gradient boosting with bagging/random forests
+- Identify and describe the role of each key XGBoost hyperparameter
+- Fit an XGBoost model using both the native `xgboost` API and `tidymodels`
+- Implement early stopping to prevent overfitting during training
+- Interpret the training log and understand how the model converges
+
+---
+
+# 1. From Bagging to Boosting
+
+Random forests build trees **in parallel** on independent bootstrap samples, then average their predictions. This reduces variance.
+
+**Boosting** takes a completely different approach: trees are built **sequentially**, where each new tree focuses on the mistakes made by all previous trees. Each tree is a small corrective step. The final prediction is the sum of all the trees' contributions.
+
+```
+Final prediction = Tree_1 + Tree_2 + Tree_3 + ... + Tree_B
+```
+
+This sequential strategy reduces **bias** — the model gets progressively better at capturing complex patterns — but requires careful regularization to avoid overfitting.
+
+---
+
+# 2. Gradient Boosting: The Core Idea
+
+Consider a regression problem where we want to predict outcome $y$ from features $X$.
+
+**Step 1:** Start with a simple prediction — the mean of $y$.
+
+**Step 2:** Compute the **residuals** (errors): $r_i = y_i - \hat{y}_i$
+
+**Step 3:** Fit a small tree to the residuals. This tree predicts "how wrong was my current model?"
+
+**Step 4:** Add a fraction of that tree's predictions to the current model:
+
+$$\hat{y} \leftarrow \hat{y} + \eta \cdot f_{\text{new}}(X)$$
+
+where $\eta$ (eta, the **learning rate**) controls how much each tree contributes.
+
+**Step 5:** Repeat from Step 2 until a stopping criterion is reached.
+
+The "gradient" in gradient boosting refers to the fact that residuals are the negative gradient of the squared-error loss function. For other loss functions (e.g., log-loss for classification), the algorithm computes the appropriate gradient.
+
+## 2.1 Why "Gradient" Boosting?
+
+Different loss functions have different gradients. For classification with log-loss, the pseudo-residuals become:
+
+$$r_i = y_i - p_i$$
+
+where $p_i$ is the predicted probability. This generalizes to any differentiable loss — hence the name.
+
+---
+
+# 3. What Makes XGBoost Different?
+
+XGBoost (eXtreme Gradient Boosting, Chen & Guestrin 2016) introduced several improvements over the original gradient boosting algorithm:
+
+| Feature | Benefit |
+|---------|---------|
+| **L1 and L2 regularization** | Directly penalizes leaf weights to prevent overfitting |
+| **Second-order gradients (Newton's method)** | More accurate search direction; faster convergence |
+| **Column subsampling** (`colsample_bytree`) | Like random forests — decorrelates trees |
+| **Row subsampling** (`subsample`) | Stochastic gradient boosting — faster and regularizing |
+| **Sparsity awareness** | Handles missing values natively |
+| **Cache-aware computation** | Optimized for modern CPU architectures |
+| **Parallel tree construction** | Splits are evaluated in parallel |
+
+---
+
+# 4. Setup
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(tidymodels)
+library(modeldata)
+library(xgboost)     # XGBoost native API
+library(vip)         # variable importance
+
+set.seed(2024)
+```
+
+```{r}
+#| label: load-data
+data(attrition)
+
+set.seed(2024)
+att_split <- initial_split(attrition, prop = 0.80, strata = Attrition)
+att_train <- training(att_split)
+att_test  <- testing(att_split)
+```
+
+---
+
+# 5. XGBoost via the Native API
+
+The native `xgboost` package gives us the most direct control and transparency. Data must be converted to `xgb.DMatrix` format.
+
+## 5.1 Preparing the Data
+
+XGBoost requires all features to be numeric. We need to one-hot encode factor variables.
+
+```{r}
+#| label: prepare-matrices
+# Separate features and outcome
+# model.matrix automatically one-hot encodes factors (intercept column dropped)
+X_train <- model.matrix(Attrition ~ . - 1, data = att_train)
+X_test  <- model.matrix(Attrition ~ . - 1, data = att_test)
+
+# Encode outcome as 0/1
+y_train <- as.integer(att_train$Attrition == "Yes")
+y_test  <- as.integer(att_test$Attrition  == "Yes")
+
+cat("Training feature matrix:", dim(X_train), "\n")
+cat("Test feature matrix:    ", dim(X_test),  "\n")
+```
+
+```{r}
+#| label: dmatrix
+# Convert to XGBoost's internal format
+dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+dtest  <- xgb.DMatrix(data = X_test,  label = y_test)
+```
+
+## 5.2 Key Hyperparameters
+
+```{r}
+#| label: params
+params <- list(
+  booster          = "gbtree",        # tree-based booster (vs. gblinear)
+  objective        = "binary:logistic", # binary classification with log-loss
+  eval_metric      = "logloss",       # evaluation metric
+  eta              = 0.1,             # learning rate (shrinkage)
+  max_depth        = 4,               # maximum tree depth
+  subsample        = 0.8,             # fraction of rows sampled per tree
+  colsample_bytree = 0.8,             # fraction of columns sampled per tree
+  min_child_weight = 5,               # minimum sum of instance weight in a leaf
+  gamma            = 0,               # minimum loss reduction to make a split
+  lambda           = 1,               # L2 regularization on leaf weights
+  alpha            = 0                # L1 regularization on leaf weights
+)
+```
+
+### Hyperparameter Guide
+
+| Parameter | What it controls | Direction to reduce overfitting |
+|-----------|-----------------|--------------------------------|
+| `eta` | Step size per tree | Decrease (more trees needed) |
+| `max_depth` | Tree complexity | Decrease |
+| `subsample` | Row sampling fraction | Decrease (more stochastic) |
+| `colsample_bytree` | Column sampling fraction | Decrease |
+| `min_child_weight` | Minimum samples in a leaf | Increase |
+| `gamma` | Split gain threshold | Increase |
+| `lambda` | L2 weight regularization | Increase |
+| `alpha` | L1 weight regularization | Increase |
+
+## 5.3 Training with Early Stopping
+
+Instead of choosing the number of trees (`nrounds`) in advance, **early stopping** monitors validation performance and stops training when it stops improving. This is one of the most practical tools in XGBoost.
+
+```{r}
+#| label: train-early-stopping
+set.seed(2024)
+xgb_model <- xgb.train(
+  params    = params,
+  data      = dtrain,
+  nrounds   = 500,           # maximum number of trees
+  watchlist = list(train = dtrain, test = dtest),
+  early_stopping_rounds = 30,  # stop if test metric doesn't improve for 30 rounds
+  verbose   = 1,
+  print_every_n = 50
+)
+```
+
+```{r}
+#| label: early-stopping-result
+cat("\nBest iteration:    ", xgb_model$best_iteration, "\n")
+cat("Best test logloss: ", round(xgb_model$best_score, 5), "\n")
+```
+
+## 5.4 Visualizing the Training Log
+
+```{r}
+#| label: training-log
+# Extract evaluation log
+eval_log <- as_tibble(xgb_model$evaluation_log)
+
+eval_log |>
+  pivot_longer(cols = -iter, names_to = "split", values_to = "logloss") |>
+  mutate(split = str_replace(split, "_logloss", "")) |>
+  ggplot(aes(x = iter, y = logloss, color = split)) +
+  geom_line(linewidth = 0.8) +
+  geom_vline(xintercept = xgb_model$best_iteration,
+             linetype = "dashed", color = "gray40") +
+  annotate("text",
+           x = xgb_model$best_iteration + 5,
+           y = max(eval_log$test_logloss),
+           label = paste("Best:", xgb_model$best_iteration),
+           hjust = 0, size = 3.5) +
+  scale_color_manual(values = c(train = "steelblue", test = "tomato")) +
+  labs(
+    title = "XGBoost Training Log",
+    x     = "Boosting Round",
+    y     = "Log-Loss",
+    color = NULL
+  ) +
+  theme_minimal()
+```
+
+::: {.callout-note}
+**Reading the training log**: The training logloss (blue) keeps decreasing — the model is always learning more from the training data. The test logloss (red) decreases at first, then levels off or rises slightly. The dashed line marks the optimal point where early stopping triggered.
+:::
+
+## 5.5 Generating Predictions
+
+```{r}
+#| label: native-predictions
+# Predicted probabilities
+prob_preds <- predict(xgb_model, dtest)
+head(prob_preds)
+
+# Convert to class labels at 0.5 threshold
+class_preds <- if_else(prob_preds >= 0.5, "Yes", "No")
+
+# Accuracy
+accuracy <- mean(class_preds == att_test$Attrition)
+cat("Test accuracy:", round(accuracy, 4), "\n")
+```
+
+## 5.6 Variable Importance
+
+```{r}
+#| label: native-importance
+#| fig-height: 7
+importance_mat <- xgb.importance(model = xgb_model)
+head(importance_mat, 10)
+```
+
+```{r}
+#| label: importance-plot
+xgb.plot.importance(importance_mat, top_n = 15, main = "XGBoost Feature Importance")
+```
+
+Three importance measures:
+
+- **Gain** – average improvement in loss from splits using this feature (most informative)
+- **Cover** – average number of samples passing through splits on this feature
+- **Frequency** – fraction of splits that use this feature
+
+---
+
+# 6. XGBoost via `tidymodels`
+
+The `tidymodels` approach provides a consistent interface, easy preprocessing, and connects seamlessly to the tuning workflow we'll use in Week 4.
+
+```{r}
+#| label: tidymodels-spec
+xgb_spec <- boost_tree(
+  trees          = 200,       # nrounds
+  tree_depth     = 4,         # max_depth
+  learn_rate     = 0.1,       # eta
+  loss_reduction = 0,         # gamma
+  sample_size    = 0.8,       # subsample
+  mtry           = 0.8,       # colsample_bytree (as a fraction when < 1)
+  min_n          = 5          # min_child_weight
+) |>
+  set_engine("xgboost") |>
+  set_mode("classification")
+```
+
+```{r}
+#| label: tidymodels-recipe
+# Preprocessing: encode factors and normalize (XGBoost doesn't need normalization
+# but it's good practice for numeric stability in some loss functions)
+xgb_recipe <- recipe(Attrition ~ ., data = att_train) |>
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) |>   # one-hot encode factors
+  step_zv(all_predictors())                                  # remove zero-variance cols
+```
+
+```{r}
+#| label: tidymodels-workflow
+xgb_workflow <- workflow() |>
+  add_recipe(xgb_recipe) |>
+  add_model(xgb_spec)
+```
+
+```{r}
+#| label: tidymodels-fit
+#| message: false
+xgb_fit <- fit(xgb_workflow, data = att_train)
+```
+
+```{r}
+#| label: tidymodels-eval
+xgb_preds <- predict(xgb_fit, att_test) |>
+  bind_cols(predict(xgb_fit, att_test, type = "prob")) |>
+  bind_cols(att_test |> select(Attrition))
+
+metrics(xgb_preds, truth = Attrition, estimate = .pred_class, .pred_Yes)
+```
+
+```{r}
+#| label: tidymodels-vip
+#| fig-height: 6
+vip(xgb_fit, num_features = 15) +
+  labs(title = "XGBoost Variable Importance (tidymodels)") +
+  theme_minimal()
+```
+
+---
+
+# 7. Effect of Learning Rate
+
+The learning rate `eta` controls the contribution of each tree. A smaller `eta` requires more trees but often generalizes better.
+
+```{r}
+#| label: eta-comparison
+eta_results <- map_dfr(c(0.001, 0.01, 0.05, 0.1, 0.3, 0.5), function(lr) {
+  m <- xgb.train(
+    params    = modifyList(params, list(eta = lr)),
+    data      = dtrain,
+    nrounds   = 300,
+    watchlist = list(test = dtest),
+    early_stopping_rounds = 20,
+    verbose   = 0
+  )
+  tibble(
+    eta           = lr,
+    best_iter     = m$best_iteration,
+    test_logloss  = m$best_score
+  )
+})
+
+eta_results
+```
+
+```{r}
+#| label: eta-plot
+eta_results |>
+  ggplot(aes(x = factor(eta), y = test_logloss, group = 1)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(aes(size = best_iter), color = "steelblue") +
+  labs(
+    title = "Effect of Learning Rate on Test Log-Loss",
+    x     = "Learning Rate (eta)",
+    y     = "Best Test Log-Loss",
+    size  = "Trees needed"
+  ) +
+  theme_minimal()
+```
+
+::: {.callout-tip}
+**Rule of thumb**: Start with `eta = 0.1` and a moderate number of trees (200–500). If you want to squeeze out more performance, reduce `eta` to 0.01–0.05 and allow more trees (1000+). Always use early stopping.
+:::
+
+---
+
+# 8. Comparing All Three Models
+
+```{r}
+#| label: model-comparison
+#| message: false
+library(rpart)
+library(ranger)
+
+# Refit tree and RF for comparison
+tree_model <- rpart(Attrition ~ ., data = att_train, method = "class",
+                    control = rpart.control(cp = 0.01, maxdepth = 4))
+tree_acc <- mean(predict(tree_model, att_test, type = "class") == att_test$Attrition)
+
+rf_model <- ranger(Attrition ~ ., data = att_train, num.trees = 500,
+                   seed = 2024, probability = FALSE)
+rf_preds_vec <- predict(rf_model, att_test)$predictions
+rf_acc <- mean(rf_preds_vec == att_test$Attrition)
+
+xgb_acc <- metrics(xgb_preds, truth = Attrition, estimate = .pred_class) |>
+  filter(.metric == "accuracy") |> pull(.estimate)
+
+tibble(
+  Model    = c("Decision Tree (depth 4)", "Random Forest (500 trees)",
+               "XGBoost (200 trees, eta = 0.1)"),
+  Accuracy = round(c(tree_acc, rf_acc, xgb_acc), 4)
+) |>
+  arrange(desc(Accuracy))
+```
+
+---
+
+# 9. Summary
+
+| Concept | Key Takeaway |
+|---------|-------------|
+| Boosting | Sequential: each tree corrects the errors of all previous trees |
+| Gradient boosting | Uses loss function gradients as pseudo-residuals to guide tree fitting |
+| XGBoost | Adds regularization, second-order gradients, and subsampling to GBM |
+| `eta` (learning rate) | Controls step size; smaller = more trees needed but better generalization |
+| `max_depth` | Tree complexity; keep at 3–6 for most problems |
+| Early stopping | Automatically finds the optimal number of trees |
+| `tidymodels` | Provides a clean workflow interface for XGBoost |
+
+---
+
+# 10. Exercises
+
+1. **Learning rate sweep** – Fit XGBoost models with `eta` values of 0.001, 0.01, 0.05, 0.1, and 0.3 using early stopping. Plot the number of trees needed vs. final test log-loss. What's the best eta-trees combination?
+
+2. **Tree depth** – Hold `eta = 0.1` constant and vary `max_depth` from 1 to 8. How does test accuracy change? At what depth does overfitting become visible?
+
+3. **Regularization** – Increase `lambda` to 5 and `alpha` to 1. Does this improve test accuracy? Does it change which features are deemed important?
+
+4. **Subsampling** – Vary `subsample` from 0.3 to 1.0. Does stochastic boosting improve performance? Does it speed up training?
+
+5. **Native vs. tidymodels** – Compare the variable importance rankings from the native `xgboost` model to those from the `tidymodels` fit. Are they identical? If not, why might they differ?

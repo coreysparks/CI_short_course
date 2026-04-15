@@ -1,0 +1,549 @@
+---
+title: "GBM Short Course – Week 5"
+subtitle: "Model Evaluation and Interpretation"
+format:
+  html:
+    toc: true
+    code-fold: false
+    code-tools: true
+    highlight-style: arrow
+    self-contained: true
+    df-print: paged
+---
+
+# Learning Objectives
+
+By the end of this lesson you will be able to:
+
+- Select and interpret appropriate metrics for classification and regression tasks
+- Construct and read a confusion matrix, including precision, recall, and F1 score
+- Build and interpret an ROC curve; compute and explain AUC
+- Generate and visualize SHAP (SHapley Additive exPlanations) values with `shapviz`
+- Create partial dependence plots (PDPs) to understand marginal feature effects
+- Identify feature interactions using 2D partial dependence plots
+
+---
+
+# 1. Why Evaluation and Interpretation Matter
+
+A model is only useful if we can:
+
+1. **Trust it** – have an honest estimate of how well it generalizes to new data
+2. **Understand it** – know which features drive predictions and how
+
+For applied social science research, interpretability is especially critical: stakeholders and policymakers need to understand *why* a model produces a given output, not just what it predicts.
+
+---
+
+# 2. Setup
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(tidymodels)
+library(modeldata)
+library(xgboost)
+library(vip)         # variable importance
+library(pdp)         # partial dependence plots
+library(shapviz)     # SHAP values and plots
+
+set.seed(2024)
+```
+
+```{r}
+#| label: load-and-split
+data(attrition)
+
+set.seed(2024)
+att_split <- initial_split(attrition, prop = 0.80, strata = Attrition)
+att_train <- training(att_split)
+att_test  <- testing(att_split)
+```
+
+## 2.1 Fit Our Best Model
+
+We use a well-tuned XGBoost model (representative parameters from Week 4 tuning) for all examples in this lesson.
+
+```{r}
+#| label: fit-model
+#| message: false
+
+xgb_recipe <- recipe(Attrition ~ ., data = att_train) |>
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) |>
+  step_zv(all_predictors())
+
+xgb_spec <- boost_tree(
+  trees          = 300,
+  tree_depth     = 4,
+  learn_rate     = 0.05,
+  loss_reduction = 0.001,
+  sample_size    = 0.75,
+  mtry           = 0.7,
+  min_n          = 8
+) |>
+  set_engine("xgboost", nthread = 1) |>
+  set_mode("classification")
+
+xgb_workflow <- workflow() |>
+  add_recipe(xgb_recipe) |>
+  add_model(xgb_spec)
+
+xgb_fit <- fit(xgb_workflow, data = att_train)
+
+# Predictions on test set
+test_preds <- predict(xgb_fit, att_test) |>
+  bind_cols(predict(xgb_fit, att_test, type = "prob")) |>
+  bind_cols(att_test |> select(Attrition))
+
+head(test_preds)
+```
+
+---
+
+# 3. Classification Metrics
+
+## 3.1 The Confusion Matrix
+
+A confusion matrix tabulates predicted vs. actual classes:
+
+|                     | Predicted: No  | Predicted: Yes |
+|---------------------|---------------|----------------|
+| **Actual: No**      | True Negative (TN) | False Positive (FP) |
+| **Actual: Yes**     | False Negative (FN) | True Positive (TP) |
+
+```{r}
+#| label: confusion-matrix
+cm <- conf_mat(test_preds, truth = Attrition, estimate = .pred_class)
+cm
+```
+
+```{r}
+#| label: confusion-plot
+autoplot(cm, type = "heatmap") +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Confusion Matrix – XGBoost Attrition Model") +
+  theme_minimal()
+```
+
+## 3.2 Derived Metrics
+
+From the confusion matrix we derive several performance metrics:
+
+```{r}
+#| label: all-metrics
+classification_metrics <- metric_set(
+  accuracy,     # (TP + TN) / total
+  sensitivity,  # TP / (TP + FN)  — also called recall or true positive rate
+  specificity,  # TN / (TN + FP)  — true negative rate
+  precision,    # TP / (TP + FP)  — positive predictive value
+  f_meas,       # harmonic mean of precision and recall
+  roc_auc       # area under the ROC curve
+)
+
+classification_metrics(
+  test_preds,
+  truth    = Attrition,
+  estimate = .pred_class,
+  .pred_Yes
+)
+```
+
+### Interpretation Guide
+
+| Metric | Formula | Good when... |
+|--------|---------|-------------|
+| **Accuracy** | (TP+TN)/N | Classes are balanced |
+| **Sensitivity (Recall)** | TP/(TP+FN) | Missing positives is costly (e.g., failing to identify someone who will leave) |
+| **Specificity** | TN/(TN+FP) | False alarms are costly |
+| **Precision** | TP/(TP+FP) | Resources are scarce; only target sure positives |
+| **F1 Score** | 2×(Precision×Recall)/(P+R) | Imbalanced classes; balances precision and recall |
+| **AUC-ROC** | (see below) | General discriminative power regardless of threshold |
+
+::: {.callout-note}
+With only ~16% of employees leaving ("Yes"), **accuracy is misleading**. A model predicting "No" for everyone achieves 84% accuracy but 0% sensitivity. Prefer AUC-ROC or F1 for imbalanced problems.
+:::
+
+## 3.3 ROC Curve and AUC
+
+The ROC (Receiver Operating Characteristic) curve plots **sensitivity** (true positive rate) against **1 - specificity** (false positive rate) across all possible classification thresholds.
+
+- **AUC = 0.5** → random guessing
+- **AUC = 1.0** → perfect classifier
+- **AUC > 0.8** → generally considered a good model
+
+```{r}
+#| label: roc-curve
+roc_data <- test_preds |>
+  roc_curve(truth = Attrition, .pred_Yes)
+
+roc_auc_val <- test_preds |>
+  roc_auc(truth = Attrition, .pred_Yes) |>
+  pull(.estimate)
+
+autoplot(roc_data) +
+  annotate("text", x = 0.6, y = 0.2,
+           label = paste("AUC =", round(roc_auc_val, 3)),
+           size = 5, color = "steelblue") +
+  labs(title = "ROC Curve – XGBoost Attrition Model") +
+  theme_minimal()
+```
+
+## 3.4 Threshold Selection
+
+The default threshold of 0.5 is rarely optimal. We can visualize how precision and recall change across thresholds.
+
+```{r}
+#| label: threshold-tradeoff
+threshold_data <- test_preds |>
+  pr_curve(truth = Attrition, .pred_Yes)
+
+autoplot(threshold_data) +
+  labs(title = "Precision-Recall Curve") +
+  theme_minimal()
+```
+
+```{r}
+#| label: threshold-selection
+# What if we lower the threshold to 0.3 to catch more attrition cases?
+test_preds_low_thresh <- test_preds |>
+  mutate(.pred_class_30 = if_else(.pred_Yes >= 0.3, "Yes", "No") |>
+           factor(levels = c("No", "Yes")))
+
+conf_mat(test_preds_low_thresh, truth = Attrition, estimate = .pred_class_30)
+```
+
+```{r}
+#| label: threshold-metrics
+bind_rows(
+  test_preds |>
+    mutate(threshold = "0.50",
+           .pred_t = if_else(.pred_Yes >= 0.50, "Yes", "No") |>
+             factor(levels = c("No", "Yes"))) |>
+    metric_set(sensitivity, specificity, precision, f_meas)(
+      truth = Attrition, estimate = .pred_t) |>
+    mutate(threshold = "0.50"),
+  test_preds |>
+    mutate(threshold = "0.30",
+           .pred_t = if_else(.pred_Yes >= 0.30, "Yes", "No") |>
+             factor(levels = c("No", "Yes"))) |>
+    metric_set(sensitivity, specificity, precision, f_meas)(
+      truth = Attrition, estimate = .pred_t) |>
+    mutate(threshold = "0.30")
+) |>
+  select(threshold, .metric, .estimate) |>
+  pivot_wider(names_from = threshold, values_from = .estimate)
+```
+
+---
+
+# 4. Regression Metrics
+
+For completeness we also demonstrate regression evaluation using the Ames housing dataset.
+
+```{r}
+#| label: regression-metrics-demo
+data(ames)
+
+set.seed(2024)
+ames_split <- initial_split(ames, prop = 0.80, strata = Sale_Price)
+ames_train <- training(ames_split)
+ames_test  <- testing(ames_split)
+
+ames_recipe <- recipe(Sale_Price ~ ., data = ames_train) |>
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) |>
+  step_zv(all_predictors())
+
+ames_spec <- boost_tree(trees = 300, tree_depth = 4, learn_rate = 0.05) |>
+  set_engine("xgboost", nthread = 1) |>
+  set_mode("regression")
+
+ames_fit <- workflow() |>
+  add_recipe(ames_recipe) |>
+  add_model(ames_spec) |>
+  fit(data = ames_train)
+
+ames_preds <- predict(ames_fit, ames_test) |>
+  bind_cols(ames_test |> select(Sale_Price))
+
+# Regression metrics
+metric_set(rmse, mae, rsq)(ames_preds, truth = Sale_Price, estimate = .pred)
+```
+
+| Metric | Formula | Interpretation |
+|--------|---------|---------------|
+| **RMSE** | $\sqrt{\frac{1}{n}\sum(y_i - \hat{y}_i)^2}$ | Average prediction error in the outcome's units; penalizes large errors |
+| **MAE** | $\frac{1}{n}\sum|y_i - \hat{y}_i|$ | Average absolute error; more robust to outliers |
+| **R²** | $1 - \frac{SS_{\text{res}}}{SS_{\text{tot}}}$ | Fraction of variance explained; 1 = perfect |
+
+---
+
+# 5. Feature Importance
+
+## 5.1 Gain-Based Importance (XGBoost built-in)
+
+```{r}
+#| label: vip-gain
+#| fig-height: 6
+vip(xgb_fit, num_features = 15) +
+  labs(title = "Variable Importance: Gain") +
+  theme_minimal()
+```
+
+## 5.2 Permutation Importance
+
+Permutation importance is model-agnostic: for each feature, randomly shuffle its values and measure how much the performance drops. Features that cause large drops are most important.
+
+```{r}
+#| label: permutation-importance
+#| fig-height: 6
+# Prepare test data in preprocessed form
+prepped <- prep(xgb_recipe)
+X_test_baked <- bake(prepped, new_data = att_test) |>
+  select(-Attrition)
+
+vip(
+  xgb_fit,
+  method      = "permute",
+  train       = att_test,
+  target      = "Attrition",
+  metric      = "roc_auc",
+  pred_wrapper = function(object, newdata) {
+    predict(object, newdata, type = "prob")$.pred_Yes
+  },
+  num_features = 15
+) +
+  labs(title = "Variable Importance: Permutation (AUC-based)") +
+  theme_minimal()
+```
+
+---
+
+# 6. SHAP Values
+
+**SHAP** (SHapley Additive exPlanations) values provide a theoretically grounded method for explaining individual predictions. For each observation, SHAP assigns each feature a contribution (positive or negative) to the prediction relative to the average prediction.
+
+Key properties:
+- **Local**: explains a single prediction
+- **Consistent**: features that always matter more get higher SHAP values
+- **Additive**: SHAP values sum to the difference between the prediction and the baseline
+
+For tree-based models, SHAP values can be computed exactly and efficiently using the `TreeSHAP` algorithm built into XGBoost.
+
+## 6.1 Computing SHAP Values
+
+```{r}
+#| label: shap-compute
+
+# Extract the underlying xgboost model object
+xgb_engine <- extract_fit_engine(xgb_fit)
+
+# Bake the test data through the recipe (one-hot encode, etc.)
+prepped_recipe <- prep(xgb_recipe)
+X_test_shap <- bake(prepped_recipe, new_data = att_test, composition = "matrix",
+                    all_predictors())
+
+# Create shapviz object
+shp <- shapviz(xgb_engine, X_pred = X_test_shap, X = att_test)
+```
+
+## 6.2 SHAP Summary Plot (Beeswarm)
+
+The beeswarm plot shows how each feature affects predictions across all observations. Each dot is one observation. Color represents the original feature value (red = high, blue = low).
+
+```{r}
+#| label: shap-beeswarm
+#| fig-height: 8
+sv_importance(shp, kind = "beeswarm") +
+  labs(title = "SHAP Summary Plot: Impact on Attrition Predictions") +
+  theme_minimal()
+```
+
+**Reading the plot:**
+
+- Features at the top have the largest average impact
+- Red dots to the right mean *high values of that feature push toward "Yes" (attrition)*
+- Blue dots to the left mean *low values push away from attrition*
+
+## 6.3 SHAP Bar Plot (Mean Absolute SHAP)
+
+```{r}
+#| label: shap-bar
+#| fig-height: 6
+sv_importance(shp, kind = "bar") +
+  labs(title = "Mean |SHAP Value| by Feature") +
+  theme_minimal()
+```
+
+## 6.4 Explaining a Single Prediction (Waterfall Plot)
+
+A waterfall plot decomposes one individual's prediction into feature contributions.
+
+```{r}
+#| label: shap-waterfall-high
+# Find a high-risk employee (high predicted probability of leaving)
+high_risk_idx <- which.max(predict(xgb_fit, att_test, type = "prob")$.pred_Yes)
+
+sv_waterfall(shp, row_id = high_risk_idx) +
+  labs(title = paste0("SHAP Explanation: Observation ", high_risk_idx,
+                      " (High Attrition Risk)"))
+```
+
+```{r}
+#| label: shap-waterfall-low
+# Find a low-risk employee
+low_risk_idx <- which.min(predict(xgb_fit, att_test, type = "prob")$.pred_Yes)
+
+sv_waterfall(shp, row_id = low_risk_idx) +
+  labs(title = paste0("SHAP Explanation: Observation ", low_risk_idx,
+                      " (Low Attrition Risk)"))
+```
+
+## 6.5 SHAP Dependence Plot
+
+A SHAP dependence plot shows how the SHAP value for one feature varies with its actual value. Color indicates a second feature to reveal interactions.
+
+```{r}
+#| label: shap-dependence
+sv_dependence(shp, v = "OverTime_Yes", color_var = "MonthlyIncome") +
+  labs(
+    title = "SHAP Dependence: Overtime × Monthly Income",
+    x     = "Overtime (1 = Yes)",
+    y     = "SHAP Value for Overtime"
+  ) +
+  theme_minimal()
+```
+
+---
+
+# 7. Partial Dependence Plots
+
+**Partial dependence plots (PDPs)** show the marginal effect of one (or two) features on the predicted outcome, averaged over the distribution of all other features. Unlike SHAP, PDPs show average effects rather than effects for individual observations.
+
+## 7.1 Single-Variable PDP
+
+```{r}
+#| label: pdp-single
+#| message: false
+# Partial dependence for MonthlyIncome
+# We use the prepped/baked training data for PDPs with xgboost engine
+X_train_baked <- bake(prepped_recipe, new_data = att_train)
+
+pd_income <- partial(
+  xgb_engine,
+  pred.var    = "MonthlyIncome",
+  train       = bake(prepped_recipe, new_data = att_train,
+                     composition = "matrix", all_predictors()),
+  type        = "classification",
+  which.class = 2,   # probability of "Yes"
+  prob        = TRUE
+)
+
+plotPartial(pd_income,
+            main = "Partial Dependence: Monthly Income → P(Attrition)",
+            xlab = "Monthly Income",
+            ylab = "Predicted P(Attrition = Yes)")
+```
+
+```{r}
+#| label: pdp-overtime
+pd_ot <- partial(
+  xgb_engine,
+  pred.var    = "OverTime_Yes",
+  train       = bake(prepped_recipe, new_data = att_train,
+                     composition = "matrix", all_predictors()),
+  type        = "classification",
+  which.class = 2,
+  prob        = TRUE
+)
+
+plotPartial(pd_ot,
+            main = "Partial Dependence: Overtime → P(Attrition)",
+            xlab = "Overtime (0 = No, 1 = Yes)",
+            ylab = "Predicted P(Attrition = Yes)")
+```
+
+## 7.2 Two-Variable PDP (Interaction)
+
+A 2D PDP shows how two features jointly affect predictions. Non-parallel contour lines indicate an interaction effect.
+
+```{r}
+#| label: pdp-2d
+#| fig-height: 6
+pd_2d <- partial(
+  xgb_engine,
+  pred.var    = c("MonthlyIncome", "YearsAtCompany"),
+  train       = bake(prepped_recipe, new_data = att_train,
+                     composition = "matrix", all_predictors()),
+  type        = "classification",
+  which.class = 2,
+  prob        = TRUE,
+  grid.resolution = 20
+)
+
+plotPartial(pd_2d,
+            contour   = TRUE,
+            col.regions = RColorBrewer::brewer.pal(9, "RdBu"),
+            main = "2D PDP: Monthly Income × Years at Company\n→ P(Attrition)")
+```
+
+---
+
+# 8. Putting It All Together: Interpretable Reporting
+
+A complete model interpretation for an applied research report should include:
+
+1. **Overall performance metrics** – accuracy, AUC, F1 (on test set)
+2. **Confusion matrix** – with sensitivity/specificity to assess classification trade-offs
+3. **Global importance** – which features matter most (VIP or mean |SHAP|)
+4. **Directional effects** – SHAP beeswarm or PDPs to show direction of each feature's effect
+5. **Individual explanations** – waterfall plots for representative high- and low-risk cases
+
+```{r}
+#| label: summary-report
+cat("=== Final Model Performance Summary ===\n\n")
+
+# Overall metrics
+cat("-- Classification Metrics (Test Set) --\n")
+classification_metrics(
+  test_preds, truth = Attrition, estimate = .pred_class, .pred_Yes
+) |>
+  mutate(across(.estimate, round, 4)) |>
+  print()
+
+cat("\n-- Confusion Matrix --\n")
+conf_mat(test_preds, truth = Attrition, estimate = .pred_class) |>
+  print()
+```
+
+---
+
+# 9. Summary
+
+| Topic | Key Tool | Key Takeaway |
+|-------|----------|-------------|
+| Confusion matrix | `conf_mat()` | See TP/FP/TN/FN directly |
+| Sensitivity/specificity | `sensitivity()`, `specificity()` | Tradeoff between catching positives and avoiding false alarms |
+| ROC-AUC | `roc_curve()`, `roc_auc()` | Threshold-free measure of discriminative power |
+| F1 score | `f_meas()` | Best single metric for imbalanced classification |
+| Variable importance | `vip()` | Global feature ranking |
+| SHAP values | `shapviz` | Local (per-observation) + global explanations |
+| Partial dependence | `pdp::partial()` | Average marginal effect of a feature |
+
+---
+
+# 10. Exercises
+
+1. **Threshold optimization** – Using the ROC curve data, find the threshold that maximizes the F1 score on the test set. What is the optimal threshold? Does it differ from 0.5?
+
+2. **Class weights** – Refit the XGBoost model using `scale_pos_weight` in the `xgboost` engine (set it to the ratio of negative to positive cases). How does this affect sensitivity, specificity, and AUC?
+
+3. **SHAP for a group** – Filter the test set to employees in a specific department (e.g., "Sales"). Compute and plot SHAP values for this subgroup only. Are the important features the same as for the whole population?
+
+4. **Individual prediction audit** – Pick three employees from the test set: one correctly predicted as "Yes", one correctly predicted as "No", and one misclassified. Create waterfall plots for each. What features explain the misclassification?
+
+5. **Regression interpretation** – Using the `ames` housing model, generate a SHAP summary plot. Which features drive high sale prices? Create a PDP for `Gr_Liv_Area` (above-ground living area). Is the relationship linear or non-linear?
+
+6. **Interaction detection** – Use `sv_dependence(shp, v = "YearsAtCompany", color_var = "auto")` and let `shapviz` automatically select the most interacting feature. What interaction is revealed? Confirm it with a 2D PDP.

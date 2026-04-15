@@ -1,0 +1,387 @@
+---
+title: "GBM Short Course – Week 4"
+subtitle: "Hyperparameter Tuning and Model Validation"
+format:
+  html:
+    toc: true
+    code-fold: false
+    code-tools: true
+    highlight-style: arrow
+    self-contained: true
+    df-print: paged
+---
+
+# Learning Objectives
+
+By the end of this lesson you will be able to:
+
+- Explain why hyperparameter selection requires resampling rather than a single test set
+- Implement $k$-fold cross-validation for model evaluation using `rsample`
+- Define a tuning grid and perform grid search with `tune_grid()`
+- Use Bayesian optimization with `tune_bayes()` for more efficient hyperparameter search
+- Select and finalize a model using `select_best()` and `last_fit()`
+- Visualize hyperparameter tuning results with `autoplot()`
+
+---
+
+# 1. The Problem with Manual Hyperparameter Selection
+
+In Week 3 we hand-picked values like `eta = 0.1`, `max_depth = 4`, and `subsample = 0.8`. This works for exploration, but:
+
+- We might be tuning to a specific test set split (data leakage / optimistic bias)
+- We evaluate too few combinations to find the best settings
+- We have no principled way to report uncertainty in our estimates
+
+**Systematic hyperparameter tuning** uses resampling to estimate how each combination of hyperparameters would perform on held-out data, without touching the final test set until the very end.
+
+---
+
+# 2. Resampling Strategies
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(tidymodels)
+library(modeldata)
+library(vip)
+library(finetune)   # provides tune_race_anova() and tune_bayes()
+
+set.seed(2024)
+```
+
+```{r}
+#| label: load-data
+data(attrition)
+
+set.seed(2024)
+att_split <- initial_split(attrition, prop = 0.80, strata = Attrition)
+att_train <- training(att_split)
+att_test  <- testing(att_split)
+```
+
+## 2.1 K-Fold Cross-Validation
+
+In $k$-fold CV, the training data is split into $k$ equally-sized folds. The model is trained on $k-1$ folds and validated on the remaining fold, rotating through all folds. Performance is averaged across the $k$ validation sets.
+
+- More folds → less bias, more variance in the estimate, and more computation
+- 5 or 10 folds are the most common choices
+
+```{r}
+#| label: cv-folds
+set.seed(2024)
+att_folds <- vfold_cv(att_train, v = 5, strata = Attrition)
+att_folds
+```
+
+```{r}
+#| label: inspect-folds
+# Each fold: how many rows in analysis (training) vs. assessment (validation)?
+att_folds$splits[[1]]
+```
+
+## 2.2 Stratified Folds
+
+Because the attrition outcome is imbalanced (~16% "Yes"), we use `strata = Attrition` to ensure each fold has roughly the same proportion of "Yes" and "No" cases. Without stratification, a fold might contain too few minority-class examples to give reliable estimates.
+
+---
+
+# 3. Defining the Tuning Problem
+
+We tell `tidymodels` which hyperparameters to tune by replacing fixed values with `tune()` placeholders.
+
+```{r}
+#| label: tunable-spec
+xgb_spec <- boost_tree(
+  trees          = 500,             # fixed; early stopping will select the best
+  tree_depth     = tune(),          # max_depth: to be tuned
+  learn_rate     = tune(),          # eta: to be tuned
+  loss_reduction = tune(),          # gamma: to be tuned
+  sample_size    = tune(),          # subsample: to be tuned
+  mtry           = tune(),          # colsample_bytree: to be tuned
+  min_n          = tune()           # min_child_weight: to be tuned
+) |>
+  set_engine("xgboost") |>
+  set_mode("classification")
+```
+
+```{r}
+#| label: recipe
+xgb_recipe <- recipe(Attrition ~ ., data = att_train) |>
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) |>
+  step_zv(all_predictors())
+```
+
+```{r}
+#| label: workflow
+xgb_workflow <- workflow() |>
+  add_recipe(xgb_recipe) |>
+  add_model(xgb_spec)
+```
+
+---
+
+# 4. Grid Search
+
+**Grid search** evaluates every combination in a user-specified parameter grid. It is thorough but expensive. We use a **space-filling design** (Latin hypercube) to cover the parameter space more efficiently than a regular grid.
+
+## 4.1 Space-Filling Grid
+
+```{r}
+#| label: grid
+set.seed(2024)
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),                   # max_depth: range 1–15
+  learn_rate(),                   # eta: range 10^-10 to 0.1 (log scale)
+  loss_reduction(),               # gamma: range 10^-10 to 100 (log scale)
+  sample_size = sample_prop(),    # subsample: range 0.1–1.0
+  finalize(mtry(), att_train),    # colsample_bytree: depends on ncol(X)
+  min_n(),                        # min_child_weight: range 2–40
+  size = 30                       # 30 combinations to try
+)
+
+head(xgb_grid)
+```
+
+## 4.2 Running the Grid Search
+
+```{r}
+#| label: grid-search
+#| cache: true
+#| message: false
+# This will fit 30 models × 5 folds = 150 model fits
+# Set parallel processing if available
+doParallel::registerDoParallel()
+
+set.seed(2024)
+grid_results <- tune_grid(
+  xgb_workflow,
+  resamples = att_folds,
+  grid      = xgb_grid,
+  metrics   = metric_set(roc_auc, accuracy),
+  control   = control_grid(save_pred = FALSE, verbose = FALSE)
+)
+
+grid_results
+```
+
+## 4.3 Examining Results
+
+```{r}
+#| label: grid-results
+# Summary of results across folds
+collect_metrics(grid_results) |>
+  filter(.metric == "roc_auc") |>
+  arrange(desc(mean)) |>
+  head(10)
+```
+
+```{r}
+#| label: autoplot-grid
+#| fig-height: 8
+autoplot(grid_results) +
+  labs(title = "Grid Search: AUC-ROC by Hyperparameter Value") +
+  theme_minimal()
+```
+
+```{r}
+#| label: select-best-grid
+best_grid <- select_best(grid_results, metric = "roc_auc")
+best_grid
+```
+
+---
+
+# 5. Bayesian Optimization
+
+Grid search with 30 points gives a broad view of the hyperparameter space, but it doesn't use what it learns along the way. **Bayesian optimization** fits a probabilistic surrogate model to the observed results and uses it to intelligently select the next hyperparameter combination to try — focusing on promising regions.
+
+This is much more efficient when the search space is large.
+
+```{r}
+#| label: bayes-tuning
+#| cache: true
+#| message: false
+set.seed(2024)
+bayes_results <- tune_bayes(
+  xgb_workflow,
+  resamples  = att_folds,
+  initial    = grid_results,    # warm-start from grid search results
+  iter       = 25,              # 25 additional Bayesian iterations
+  metrics    = metric_set(roc_auc, accuracy),
+  control    = control_bayes(
+    no_improve    = 10,         # stop early if no improvement for 10 iterations
+    verbose       = FALSE,
+    save_pred     = FALSE,
+    seed          = 2024
+  )
+)
+```
+
+```{r}
+#| label: bayes-results
+collect_metrics(bayes_results) |>
+  filter(.metric == "roc_auc") |>
+  arrange(desc(mean)) |>
+  head(10)
+```
+
+```{r}
+#| label: autoplot-bayes
+#| fig-height: 5
+autoplot(bayes_results, type = "performance") +
+  labs(title = "Bayesian Optimization: AUC-ROC Over Iterations") +
+  theme_minimal()
+```
+
+```{r}
+#| label: select-best-bayes
+best_bayes <- select_best(bayes_results, metric = "roc_auc")
+best_bayes
+```
+
+---
+
+# 6. Comparing Strategies
+
+```{r}
+#| label: compare-strategies
+# Best from grid search
+best_grid_score <- show_best(grid_results, metric = "roc_auc", n = 1) |>
+  pull(mean)
+
+# Best from Bayesian optimization
+best_bayes_score <- show_best(bayes_results, metric = "roc_auc", n = 1) |>
+  pull(mean)
+
+tibble(
+  Strategy = c("Grid Search (30 combos)", "Bayesian Opt (30 + 25 iterations)"),
+  Best_ROC_AUC = round(c(best_grid_score, best_bayes_score), 4)
+)
+```
+
+---
+
+# 7. Finalizing the Model
+
+Once we've chosen the best hyperparameters, we:
+
+1. **Finalize** the workflow by substituting the best hyperparameter values
+2. **Refit** on the full training data
+3. **Evaluate** on the held-out test set — the only time we look at the test set
+
+```{r}
+#| label: finalize-workflow
+# Use the best parameters from Bayesian optimization
+final_workflow <- finalize_workflow(xgb_workflow, best_bayes)
+final_workflow
+```
+
+```{r}
+#| label: last-fit
+#| message: false
+# Fit on full training data and evaluate on test set
+set.seed(2024)
+final_fit <- last_fit(final_workflow, split = att_split,
+                      metrics = metric_set(roc_auc, accuracy, f_meas))
+
+collect_metrics(final_fit)
+```
+
+```{r}
+#| label: final-roc
+# ROC curve on test set
+final_fit |>
+  collect_predictions() |>
+  roc_curve(truth = Attrition, .pred_Yes) |>
+  autoplot() +
+  labs(title = "Final Model: ROC Curve on Test Set") +
+  theme_minimal()
+```
+
+```{r}
+#| label: final-confusion
+# Confusion matrix
+final_fit |>
+  collect_predictions() |>
+  conf_mat(truth = Attrition, estimate = .pred_class)
+```
+
+```{r}
+#| label: final-vip
+#| fig-height: 6
+# Variable importance from the final model
+final_fit |>
+  extract_fit_parsnip() |>
+  vip(num_features = 15) +
+  labs(title = "Final XGBoost: Variable Importance") +
+  theme_minimal()
+```
+
+---
+
+# 8. Full Model Object for Deployment
+
+```{r}
+#| label: extract-model
+# Fit on ALL data (train + test) for deployment
+final_model <- fit(final_workflow, data = attrition)
+
+# Save for later use
+# saveRDS(final_model, "final_xgboost_attrition.rds")
+
+final_model
+```
+
+---
+
+# 9. Comparison of All Approaches
+
+```{r}
+#| label: final-comparison
+bind_rows(
+  tibble(Approach = "Grid search best params (CV estimate)",
+         ROC_AUC  = round(best_grid_score, 4)),
+  tibble(Approach = "Bayesian opt best params (CV estimate)",
+         ROC_AUC  = round(best_bayes_score, 4)),
+  tibble(Approach = "Final model on test set",
+         ROC_AUC  = collect_metrics(final_fit) |>
+                      filter(.metric == "roc_auc") |>
+                      pull(.estimate) |>
+                      round(4))
+)
+```
+
+::: {.callout-important}
+**The CV estimate vs. test performance gap**: Cross-validation estimates are typically slightly optimistic. The test set gives the true out-of-sample performance. If the gap is large, this may indicate overfitting to the CV splits — try fewer tuning iterations or a more conservative parameter space.
+:::
+
+---
+
+# 10. Summary
+
+| Step | Tool | Purpose |
+|------|------|---------|
+| Resampling setup | `vfold_cv()` | Create $k$-fold CV splits |
+| Mark tuneable params | `tune()` | Flag which hyperparameters to search |
+| Space-filling grid | `grid_latin_hypercube()` | Cover parameter space efficiently |
+| Grid search | `tune_grid()` | Evaluate all grid combinations |
+| Bayesian optimization | `tune_bayes()` | Intelligently explore parameter space |
+| Select best | `select_best()` | Choose optimal hyperparameters |
+| Finalize & evaluate | `last_fit()` | Final evaluation on test set |
+
+---
+
+# 11. Exercises
+
+1. **Tune `nrounds` too** – Instead of fixing `trees = 500`, set `trees = tune()` and include it in the grid. Does optimizing the number of rounds improve performance?
+
+2. **Stratified CV** – Re-run the grid search without stratification (`strata = Attrition` removed). How does the CV AUC estimate compare? Is it more or less stable across folds?
+
+3. **Racing methods** – Install the `finetune` package and try `tune_race_anova()` instead of `tune_grid()`. Does this eliminate poor parameter combinations early? How does final performance compare?
+
+4. **Different metrics** – Re-tune using `metric_set(f_meas)` (F1 score) as the primary objective instead of ROC-AUC. Do the optimal hyperparameters change? Why might F1 be more appropriate for this imbalanced problem?
+
+5. **Nested cross-validation** – Implement nested CV: use an outer loop for performance estimation and an inner loop for hyperparameter tuning. This gives an unbiased estimate of the tuned model's generalization performance. (Hint: `nested_cv()` in `rsample`.)
