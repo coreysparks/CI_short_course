@@ -1,9 +1,15 @@
 project:
   title: "CI_short_course"
-  render: 
+  render:
     - CI_short_course.qmd
     - CI_prog_course.qmd
     - CI_adv_viz.qmd
+    - xgboost_course.qmd
+    - xgboost_week1.qmd
+    - xgboost_week2.qmd
+    - xgboost_week3.qmd
+    - xgboost_week4.qmd
+    - xgboost_week5.qmd
 
     
 

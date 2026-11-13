@@ -1,0 +1,320 @@
+---
+title: "GBM Short Course – Week 2"
+subtitle: "Ensemble Methods: Bagging and Random Forests"
+format:
+  html:
+    toc: true
+    code-fold: false
+    code-tools: true
+    highlight-style: arrow
+    self-contained: true
+    df-print: paged
+---
+
+# Learning Objectives
+
+By the end of this lesson you will be able to:
+
+- Explain why single decision trees have high variance and how ensemble methods address this
+- Describe the bagging algorithm and how it reduces prediction variance
+- Understand what makes random forests different from bagged trees
+- Build and evaluate a random forest model using `tidymodels` with the `ranger` engine
+- Interpret out-of-bag (OOB) error and variable importance from a random forest
+- Compare random forest performance to a single decision tree
+
+---
+
+# 1. Why Ensembles?
+
+In Week 1 we saw that a single decision tree can overfit: it captures noise in the training data and performs poorly on new data. A tree with low depth underfits; one with high depth overfits. Finding the sweet spot is hard.
+
+**Ensemble methods** combine many weak learners to produce a prediction that is more accurate and more stable than any individual model. The two main strategies are:
+
+| Strategy | Idea | Key method |
+|----------|------|------------|
+| **Bagging** | Fit many independent models on bootstrap samples; average their predictions | Random Forest |
+| **Boosting** | Fit models sequentially, each correcting errors of the previous | XGBoost (Weeks 3–4) |
+
+---
+
+# 2. Setup
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(tidymodels)
+library(modeldata)
+library(vip)        # variable importance plots
+library(ranger)     # fast random forest implementation
+
+set.seed(2024)
+```
+
+```{r}
+#| label: load-data
+data(attrition)
+
+# Train/test split (same seed as Week 1 for comparability)
+set.seed(2024)
+att_split <- initial_split(attrition, prop = 0.80, strata = Attrition)
+att_train <- training(att_split)
+att_test  <- testing(att_split)
+```
+
+---
+
+# 3. Bagging (Bootstrap Aggregating)
+
+**Bagging** works in three steps:
+
+1. Draw $B$ bootstrap samples from the training data (sample with replacement, same size as training set)
+2. Fit a full, deep decision tree on each bootstrap sample
+3. Combine predictions by majority vote (classification) or averaging (regression)
+
+Because each tree sees a different bootstrap sample, the trees make different errors. Averaging their predictions cancels out much of the individual variance.
+
+## 3.1 The Bootstrap Illustrated
+
+```{r}
+#| label: bootstrap-demo
+# A bootstrap sample: same size, drawn with replacement
+n <- nrow(att_train)
+boot_indices <- sample(1:n, size = n, replace = TRUE)
+
+# Some rows appear multiple times; some are absent
+cat("Unique rows in bootstrap sample:", length(unique(boot_indices)), "of", n, "\n")
+cat("Expected fraction in-bag: ~63.2%\n")
+cat("Rows NOT in this bootstrap sample (out-of-bag):", n - length(unique(boot_indices)), "\n")
+```
+
+The ~36.8% of rows not included in each bootstrap sample are called the **out-of-bag (OOB)** observations. These provide a free internal validation set for each tree.
+
+---
+
+# 4. Random Forests
+
+Random forests add one extra twist to bagging: at each split, only a **random subset of features** (`mtry`) is considered as candidates. This decorrelates the trees — even if one feature is very strong, it doesn't dominate every tree — making the ensemble more diverse and more powerful.
+
+**Key hyperparameters:**
+
+| Parameter | Description | Typical starting value |
+|-----------|-------------|----------------------|
+| `trees` | Number of trees | 500–1000 |
+| `mtry` | Features considered per split | $\sqrt{p}$ (classification), $p/3$ (regression) |
+| `min_n` | Minimum node size | 1–5 (classification) |
+
+## 4.1 Fitting a Random Forest with `tidymodels`
+
+We use the `tidymodels` framework, which separates model specification, preprocessing, and fitting into clean, composable steps.
+
+```{r}
+#| label: rf-spec
+# Step 1: specify the model
+rf_spec <- rand_forest(
+  trees = 500,
+  mtry  = floor(sqrt(ncol(att_train) - 1)),  # sqrt(p) rule for classification
+  min_n = 5
+) |>
+  set_engine("ranger", importance = "impurity", seed = 2024) |>
+  set_mode("classification")
+
+rf_spec
+```
+
+```{r}
+#| label: rf-recipe
+# Step 2: preprocessing recipe
+# Random forests handle numeric predictors natively but need factors encoded
+rf_recipe <- recipe(Attrition ~ ., data = att_train)
+
+# For ranger, factor predictors are handled automatically, so minimal preprocessing needed
+```
+
+```{r}
+#| label: rf-workflow
+# Step 3: bundle into a workflow
+rf_workflow <- workflow() |>
+  add_recipe(rf_recipe) |>
+  add_model(rf_spec)
+```
+
+```{r}
+#| label: rf-fit
+#| message: false
+# Step 4: fit on training data
+rf_fit <- fit(rf_workflow, data = att_train)
+rf_fit
+```
+
+## 4.2 Out-of-Bag Error Estimate
+
+```{r}
+#| label: oob-error
+# Extract the ranger model object
+ranger_model <- extract_fit_engine(rf_fit)
+
+cat("OOB prediction error (misclassification rate):",
+    round(ranger_model$prediction.error, 4), "\n")
+cat("OOB accuracy:", round(1 - ranger_model$prediction.error, 4), "\n")
+```
+
+The OOB error is estimated without setting aside a separate validation set — a useful free diagnostic.
+
+---
+
+# 5. Evaluating on the Test Set
+
+```{r}
+#| label: rf-predict
+# Predicted classes and probabilities
+rf_preds <- predict(rf_fit, att_test) |>
+  bind_cols(predict(rf_fit, att_test, type = "prob")) |>
+  bind_cols(att_test |> select(Attrition))
+
+head(rf_preds)
+```
+
+```{r}
+#| label: rf-metrics
+# Classification metrics
+rf_metrics <- rf_preds |>
+  metrics(truth = Attrition, estimate = .pred_class, .pred_Yes)
+
+rf_metrics
+```
+
+```{r}
+#| label: rf-confusion
+# Confusion matrix
+conf_mat(rf_preds, truth = Attrition, estimate = .pred_class)
+```
+
+```{r}
+#| label: roc-curve
+# ROC curve
+rf_preds |>
+  roc_curve(truth = Attrition, .pred_Yes) |>
+  autoplot() +
+  labs(title = "ROC Curve – Random Forest")
+```
+
+---
+
+# 6. Variable Importance
+
+Random forests provide two importance measures:
+
+- **Impurity-based (Gini) importance** – total reduction in node impurity attributed to each variable across all trees and all splits (fast, built into the forest)
+- **Permutation importance** – for each variable, randomly shuffle its values and measure the drop in OOB accuracy. Larger drops mean more important variables (slower but less biased toward high-cardinality variables)
+
+```{r}
+#| label: vip-plot
+#| fig-height: 6
+vip(rf_fit, num_features = 15) +
+  labs(title = "Random Forest Variable Importance (Gini Impurity)") +
+  theme_minimal()
+```
+
+```{r}
+#| label: importance-table
+# Tabular importance scores
+ranger_model$variable.importance |>
+  sort(decreasing = TRUE) |>
+  head(10) |>
+  enframe(name = "variable", value = "importance") |>
+  mutate(importance = round(importance, 2))
+```
+
+---
+
+# 7. Comparing Single Tree vs. Random Forest
+
+```{r}
+#| label: comparison
+#| message: false
+library(rpart)
+
+# Refit the best pruned tree from Week 1 for comparison
+tree_model <- rpart(
+  Attrition ~ ., data = att_train, method = "class",
+  control = rpart.control(cp = 0.01, maxdepth = 4)
+)
+tree_preds <- predict(tree_model, att_test, type = "class")
+tree_acc   <- mean(tree_preds == att_test$Attrition)
+
+rf_acc <- rf_metrics |>
+  filter(.metric == "accuracy") |>
+  pull(.estimate)
+
+tibble(
+  Model    = c("Single Decision Tree (depth 4)", "Random Forest (500 trees)"),
+  Accuracy = round(c(tree_acc, rf_acc), 4)
+) |>
+  arrange(desc(Accuracy))
+```
+
+::: {.callout-note}
+The random forest typically outperforms a single tree — often substantially — because averaging over many diverse trees reduces both variance and generalization error.
+:::
+
+---
+
+# 8. Effect of Number of Trees
+
+Adding more trees always reduces variance but with diminishing returns. We can inspect the OOB error as a function of number of trees.
+
+```{r}
+#| label: ntrees-effect
+# Fit forests of increasing size and record OOB error
+ntrees_results <- map_dfr(c(10, 25, 50, 100, 200, 500, 1000), function(n_trees) {
+  m <- ranger(
+    Attrition ~ ., data = att_train,
+    num.trees = n_trees,
+    mtry      = floor(sqrt(ncol(att_train) - 1)),
+    seed      = 2024
+  )
+  tibble(n_trees = n_trees, oob_error = m$prediction.error)
+})
+
+ntrees_results |>
+  ggplot(aes(x = n_trees, y = oob_error)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(size = 2, color = "steelblue") +
+  labs(
+    title = "OOB Error vs. Number of Trees",
+    x     = "Number of Trees",
+    y     = "OOB Misclassification Rate"
+  ) +
+  theme_minimal()
+```
+
+Once the OOB error flattens, adding more trees gives no benefit. 500 trees is typically more than sufficient.
+
+---
+
+# 9. Summary
+
+| Concept | Key Takeaway |
+|---------|-------------|
+| Bagging | Bootstrap + averaging reduces variance without increasing bias |
+| Random forest | Bagging + random feature selection decorrelates trees |
+| OOB error | Free internal estimate of test error — no separate validation set needed |
+| `mtry` | Most important RF hyperparameter; $\sqrt{p}$ is a good starting point |
+| Variable importance | Gini-based importance shows which features drive predictions |
+
+---
+
+# 10. Exercises
+
+1. **OOB vs. test accuracy** – Compare the OOB accuracy estimate to the actual test accuracy. How close are they? Would you trust the OOB estimate in practice?
+
+2. **`mtry` sensitivity** – Refit the random forest with `mtry = 2`, `mtry = 10`, and `mtry = 20`. How does test accuracy change? Plot accuracy vs. `mtry`.
+
+3. **Permutation importance** – Change `importance = "permutation"` in the ranger engine. How does the variable ranking change compared to Gini-based importance? Which variables appear more or less important?
+
+4. **Class imbalance** – The attrition outcome is imbalanced (~16% "Yes"). Add `class.weights = c(Yes = 5, No = 1)` to the ranger engine call. Does this improve sensitivity for the minority class? Check the confusion matrix.
+
+5. **Regression forest** – Load the `ames` dataset and fit a random forest to predict `Sale_Price`. Compare RMSE to a single regression tree. Which top features does the forest identify?
